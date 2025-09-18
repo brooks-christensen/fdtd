@@ -218,3 +218,4 @@ __marimo__/
 *.png
 *.zip
 *Zone.Identifier
+.old/
