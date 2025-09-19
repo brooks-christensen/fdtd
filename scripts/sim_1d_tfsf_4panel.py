@@ -10,7 +10,7 @@ from yee1d_tfsf.constants import c0, mu0, eta0
 from yee1d_tfsf.materials import vacuum, thin_film, bulk_medium
 from yee1d_tfsf.boundaries import PEC1D, PMC1D, Mur1DPerEdge
 from yee1d_tfsf.solver import Yee1DTFSF
-from yee1d_tfsf.sources import cosine_burst
+from yee1d_tfsf.sources import cosine_burst, dc_plateau, delta_impulse
 
 
 def make_medium(N, kind, **kw):
@@ -31,13 +31,16 @@ def make_medium(N, kind, **kw):
     raise ValueError("medium must be vacuum|thinfilm|bulk")
 
 
-def mk_bc(name, side, dx, dt):
+def mk_bc(name, side, dx, dt, eps_r, mu_r):
     if name == "pec":
         return PEC1D(side)
     if name == "pmc":
         return PMC1D(side)
     if name == "mur":
-        return Mur1DPerEdge(dx, dt, side)
+        if side == "left":
+            return Mur1DPerEdge(dx, dt, side, eps_r_edge=eps_r[0], mu_r_edge=mu_r[0])
+        elif side == "right":
+            return Mur1DPerEdge(dx, dt, side, eps_r_edge=eps_r[-1], mu_r_edge=mu_r[-1])
     raise ValueError("BC must be pec|pmc|mur")
 
 
@@ -48,13 +51,16 @@ def main(args):
 
     # constants
     lam0 = args.lam
-    dx = lam0 / args.ppw
+    dz = lam0 / args.ppw  # 1e-9 m by default
     nmax = 1.0
     if args.medium != "vacuum":
         nmax = max(args.n_film if args.medium == "thinfilm" else args.n_bulk, 1.0)
-    dt = args.S * dx / (c0 * nmax)
+    dt = args.S * dz / (c0 * nmax)  # about 3.3e-18 s
     N = args.N
-    i1, i2 = args.i1, args.i2
+    # i1, i2 = args.i1, args.i2
+    i1 = args.i1
+    i2 = None if args.i2 < 0 else args.i2
+
     if args.medium == "thinfilm":
         eps_r, mu_r, sigma_e = make_medium(
             N,
@@ -71,7 +77,7 @@ def main(args):
     else:
         eps_r, mu_r, sigma_e = make_medium(N, "vacuum")
     f0 = c0 / lam0
-    t0 = args.t0 * (dx / c0)
+    t0 = args.t0 * (dz / c0)
     probe_inc = args.probe_inc
     probe_refl = args.probe_refl
     T = args.Tsteps
@@ -81,20 +87,38 @@ def main(args):
 
     # define source field as a function of time
     # src = lambda t: cosine_burst(t, t0, f0, cycles=args.cycles)
+    # def src(t):
+    #     if args.src == "pulse":
+    #         return cosine_burst(t, t0, f0, cycles=args.cycles)
+    #     elif args.src == "dc":
+    #         return dc_plateau(t, args.default_on_ps, args.default_off_ps, args.A)
+    #     elif args.src == "delta":
+    #         return delta_impulse(t, args.imp_at_ps, args.A, dt)
     def src(t):
-        return cosine_burst(t, t0, f0, cycles=args.cycles)
+        if args.src == "burst":
+            return cosine_burst(t, t0, f0, cycles=args.cycles)
+        elif args.src == "dc":
+            t_on = args.dc_on_ps * 1e-12
+            t_off = args.dc_off_ps * 1e-12
+            return dc_plateau(t, t_on, t_off, A=args.A)
+        elif args.src == "impulse":
+            t_at = args.imp_at_ps * 1e-12
+            return delta_impulse(t, t_at, A=args.A, dt=dt)
+        else:
+            return 0.0
 
     # create simulation and boundaries
-    sim = Yee1DTFSF(N, dx, dt, eps_r, mu_r, sigma_e=sigma_e, i1=i1, i2=i2, src_fn=src)
-    bcL = mk_bc(args.bc_left, "left", dx, dt)
-    bcR = mk_bc(args.bc_right, "right", dx, dt)
+    sim = Yee1DTFSF(N, dz, dt, eps_r, mu_r, sigma_e=sigma_e, i1=i1, i2=i2, src_fn=src)
+    bcL = mk_bc(args.bc_left, "left", dz, dt, eps_r, mu_r)
+    bcR = mk_bc(args.bc_right, "right", dz, dt, eps_r, mu_r)
 
     # run sim
     for n in range(T):
         sim.step(n, bc_left=bcL, bc_right=bcR)
-        Einc = src(t[n] - probe_inc * dx / c0)
+        Einc = src(t[n] - probe_inc * dz / c0)
         # Binc = mu0 * (Einc / eta0)
-        Binc = mu0 * (src(t[n] + (dt / 2) - ((probe_inc * dx) / c0)) / eta0)
+        # Binc = mu0 * (src(t[n] + (dt / 2) - ((probe_inc * dx) / c0)) / eta0)
+        Binc = (mu0 / eta0) * Einc
         m = max(0, probe_refl - 1)
         Esc = sim.Ex[probe_refl]
         Bsc = mu0 * sim.Hy[m]
@@ -132,7 +156,7 @@ def main(args):
     if args.animate and len(frames) > 0:
         # import matplotlib.pyplot as plt
         frames = np.array(frames)
-        x = np.arange(N) * dx * 1e6
+        x = np.arange(N) * dz * 1e6
         fig2, ax2 = plt.subplots(figsize=(7, 3))
         (ln,) = ax2.plot(x, frames[0])
         ax2.set_ylim(1.1 * np.min(frames), 1.1 * np.max(frames))
@@ -146,6 +170,7 @@ def main(args):
 
         ani = FuncAnimation(fig2, update, frames=len(frames), interval=50, blit=True)
         gif_path = outdir / f"ez_anim_{args.bc_left}_{args.bc_right}_{args.medium}.gif"
+        print(f"Attempting to save animation to {gif_path}....")
         ani.save(gif_path, writer=PillowWriter(fps=20))
         plt.close(fig2)
 
@@ -157,11 +182,11 @@ if __name__ == "__main__":
     ap.add_argument("--lam", type=float, default=500e-9)
     ap.add_argument("--S", type=float, default=1.0)
     ap.add_argument("--cycles", type=float, default=2.0)
-    ap.add_argument("--t0", type=float, default=200.0)
+    ap.add_argument("--t0", type=float, default=1500.0)
     ap.add_argument("--i1", type=int, default=200)
     ap.add_argument("--i2", type=int, default=-1)
-    ap.add_argument("--probe_inc", type=int, default=300)
-    ap.add_argument("--probe_refl", type=int, default=100)
+    ap.add_argument("--probe_inc", type=int, default=600)
+    ap.add_argument("--probe_refl", type=int, default=160)
     ap.add_argument("--bc_left", type=str, default="mur")
     ap.add_argument("--bc_right", type=str, default="pec")
     ap.add_argument(
@@ -176,6 +201,13 @@ if __name__ == "__main__":
     ap.add_argument("--Tsteps", type=int, default=5000)
     ap.add_argument("--outdir", type=str, default="outputs")
     ap.add_argument("--animate", action="store_true")
-    ap.add_argument("--anim_stride", type=int, default=5)
+    ap.add_argument("--anim_stride", type=int, default=1)
+    ap.add_argument(
+        "--src", type=str, default="burst", choices=["burst", "dc", "impulse"]
+    )
+    ap.add_argument("--A", type=float, default=1.0)
+    ap.add_argument("--dc_on_ps", type=float, default=0.0)
+    ap.add_argument("--dc_off_ps", type=float, default=2.0)
+    ap.add_argument("--imp_at_ps", type=float, default=0.0)
     args = ap.parse_args()
     main(args)

@@ -66,7 +66,7 @@ class Yee1DTFSF:
         mu_r,
         sigma_e=None,
         i1=200,
-        i2=800,  # pass None (or -1) for left-only TFSF
+        i2: Optional[int] = 800,  # pass None (or -1) for left-only TFSF
         src_fn=None,
     ):
         # Grid and time step
@@ -131,12 +131,12 @@ class Yee1DTFSF:
 
     def H_inc(self, m, t):
         """
-        Incident H at H-face m-1/2 and time t+1/2.
-        For +z propagation: H = E / η0 at z = (m - 0.5) * dz.
+        Incident H at H-face m+1/2 and time t+1/2.
+        For +z propagation: H = E / η0 at z = (m + 0.5) * dz.
         """
         if self.src_fn is None:
             return 0.0
-        z = (m - 0.5) * self.dz
+        z = (m + 0.5) * self.dz
         return self.src_fn(t - z / c0) / eta0
 
     # ---------- One full Yee time step with TFSF and BCs ----------
@@ -162,17 +162,16 @@ class Yee1DTFSF:
         self.Hy -= self.Ch * curlE
 
         # 2) TFSF corrections on H
-        #    Use E_inc at half-step time
         th = (n + 0.5) * self.dt
 
         # Left face at m = i1 − 1 :  + (dt / μΔx) * E_inc(i1, th)
-        self.Hy[self.i1 - 1] += (
+        self.Hy[self.i1 - 1] -= (
             self.dt / (mu0 * self.mu_r[self.i1 - 1] * self.dz)
         ) * self.E_inc(self.i1, th)
 
-        # Right face at m = i2     :  − (dt / μΔx) * E_inc(i2, th)
+        # Right face at m = i2     :  - (dt / μΔx) * E_inc(i2, th)
         if self.i2 is not None:
-            self.Hy[self.i2] -= (
+            self.Hy[self.i2] += (
                 self.dt / (mu0 * self.mu_r[self.i2] * self.dz)
             ) * self.E_inc(self.i2, th)
 
@@ -188,7 +187,7 @@ class Yee1DTFSF:
         self.Ex = self.Ce1 * self.Ex - self.Ce2 * curlH
 
         # 5) TFSF corrections on E
-        #    Use H_inc at full-step time
+        #    Use H_inc at half-step time
         te = (n + 1.0) * self.dt
 
         # Left node at p = i1      :  − (dt / εΔx) * H_inc(i1 − 1, te)
